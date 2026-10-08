@@ -1,0 +1,66 @@
+# Multi-Channel Inventory Sync - simulation & engine rules
+# One file drives the synthetic data, the sync engine and the reorder logic.
+# All data is SYNTHETIC (fixed seed). No real brands, stores or people.
+
+seed: 42
+skus: 10000
+start_date: "2026-07-01"     # first day of the live order stream
+history_days: 90             # past sales used to plan (avg demand, sigma)
+horizon_days: 60             # live order stream simulated through the engine
+
+catalog:
+  # name: [weight, price_log_mu, price_log_sigma, margin_lo, margin_hi]
+  Home & Kitchen:       [0.18, 3.10, 0.55, 0.25, 0.40]
+  Beauty & Personal:    [0.13, 2.85, 0.45, 0.35, 0.55]
+  Sports & Outdoors:    [0.11, 3.40, 0.60, 0.22, 0.38]
+  Toys & Games:         [0.10, 3.00, 0.50, 0.25, 0.42]
+  Pet Supplies:         [0.09, 2.95, 0.50, 0.25, 0.40]
+  Tech Accessories:     [0.12, 3.05, 0.55, 0.30, 0.50]
+  Office & Stationery:  [0.07, 2.50, 0.45, 0.30, 0.45]
+  Apparel Basics:       [0.10, 3.15, 0.40, 0.40, 0.60]
+  Garden & Patio:       [0.05, 3.55, 0.60, 0.22, 0.35]
+  Health & Wellness:    [0.05, 3.00, 0.45, 0.30, 0.48]
+
+suppliers: 24                # synthetic supplier ids SUP-001..SUP-024
+lead_time_days: [7, 35]      # per supplier, uniform
+
+demand:
+  total_daily_orders: 2600   # whole catalogue, across all channels
+  pareto_alpha: 1.15         # popularity skew: a few SKUs sell most units
+  burst_shape: 2.0           # gamma-Poisson (negative binomial) day-to-day noise
+  qty_geometric_p: 0.78      # order quantity 1,2,3.. (capped at max_qty)
+  max_qty: 4
+  hour_profile: [1,1,1,1,1,2,3,4,5,6,6,6,6,6,6,6,6,7,8,9,9,7,4,2]
+
+channels:
+  # id: [display name, share of orders, push latency seconds, offer cap of available]
+  WEB: ["Online Store",  0.45,  3, 1.00]
+  MKA: ["Marketplace A", 0.35, 12, 1.00]
+  MKB: ["Marketplace B", 0.20, 25, 1.00]   # optional policy: cap < 1.0 lists only part of stock here
+
+events:
+  duplicate_webhook_rate: 0.006   # channel re-delivers the same order event
+  cancel_rate: 0.015              # buyer cancels before shipment
+  return_rate: 0.010              # shipped order returned to stock
+  ship_after_hours: [2, 30]
+  return_after_days: [3, 14]
+  silent_push_drop_rate: 0.004    # a qty INCREASE push "succeeds" but never lands
+
+engine:
+  naive_sync_minutes: 15          # baseline: snapshot push every N minutes (overridden per baseline)
+  baselines_minutes: [1440, 240, 60, 15]   # 1440 = stock updated once a day (spreadsheet by hand)
+  hot_sku_daily_units: 6          # SKUs selling >= this get a publish buffer
+  publish_buffer_units: 1         # held back on hot SKUs to absorb push latency
+  # Optional policy, OFF: measured on this dataset it cut sell-through ~1% without
+  # removing any further oversells (event-time reservation alone already reaches 0).
+  last_units_fast_channel_only: 0 # at <= N units left, only the lowest-latency channel keeps selling
+  alert_digest_minutes: 15        # low-stock digest cadence
+  alert_cooldown_hours: 24        # no repeat alert for the same SKU inside this window
+  nightly_run_hour: 2             # PO drafting + reconciliation sweep
+
+reorder:
+  service_level_z: 1.65           # 95% cycle service level
+  order_cost_usd: 40              # S in EOQ
+  holding_rate: 0.25              # H = unit cost x holding_rate per year
+  start_cover_days: [14, 50]      # opening stock = cover x avg daily demand + safety stock
+  near_stockout_share: 0.04       # SKUs that open just below their reorder point
