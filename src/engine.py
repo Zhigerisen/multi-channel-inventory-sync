@@ -326,9 +326,10 @@ class Sim:
         self.was_below = below
 
     def on_nightly(self, t: float) -> None:
-        """Draft one purchase order per supplier for every SKU at/below its reorder point."""
+        """(s, Q) policy: when stock position (available + on order) is at/below the reorder
+        point, draft a line; lines are grouped into one purchase order per supplier."""
         position = self.on_hand - self.reserved + self.on_order
-        need = np.flatnonzero((position <= self.rop) & (self.on_order == 0) & self.mover)
+        need = np.flatnonzero((position <= self.rop) & self.mover)
         by_supplier: dict[str, list[int]] = {}
         for s in need:
             by_supplier.setdefault(self.supplier[s], []).append(int(s))
