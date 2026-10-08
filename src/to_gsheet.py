@@ -22,7 +22,8 @@ from common import OUT
 
 SHEET_ID = "1xuyR0t6gkZ9dnGQ21nkTpJg70_qXwlOIxhREZTqfhgM"
 REPO = "https://github.com/Zhigerisen/multi-channel-inventory-sync"
-CREDS = r"C:\Users\zhiga\.claude\google-credentials.json"
+# service-account key: env GOOGLE_CREDENTIALS, else ~/.claude/google-credentials.json
+CREDS = os.environ.get("GOOGLE_CREDENTIALS", os.path.expanduser("~/.claude/google-credentials.json"))
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 CHUNK = 2500
 # SKU, Product, Category, Supplier, 6 stock columns, Status, 3 channel columns, cost, price, value
