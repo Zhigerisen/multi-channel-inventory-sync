@@ -69,25 +69,35 @@ def test_cross_channel_race_oversells_on_schedule_but_not_with_engine():
     assert int(engine.state.loc[0, "reserved"]) == 2
 
 
-def test_redelivered_webhook_reserves_once():
+@pytest.mark.parametrize("mode", ["naive", "engine"])
+def test_redelivered_webhook_reserves_once(mode):
     master = make_master([{"sku": "A", "on_hand_open": 5}])
     feed = make_feed([(100, "WEB", "WEB-1", "A", 1), (200, "WEB", "WEB-1", "A", 1)])
-    engine = simulate(master, make_listings(["A"]), feed, make_rules(), "engine")
-    naive = simulate(master, make_listings(["A"]), feed, make_rules(), "naive")
-    assert engine.metrics["dup_ignored"] == 1
-    assert int(engine.state.loc[0, "reserved"]) == 1
-    assert naive.metrics["phantom_reservations"] == 1
-    assert int(naive.state.loc[0, "reserved"]) == 2   # stock locked by a phantom reservation
+    res = simulate(master, make_listings(["A"]), feed, make_rules(), mode)
+    assert res.metrics["dup_ignored"] == 1
+    assert int(res.state.loc[0, "reserved"]) == 1
+
+
+def low_stock_feed() -> pd.DataFrame:
+    return make_feed([(100, "WEB", "WEB-1", "A", 1, 30.0),   # dips to 8, cancelled after 30 min
+                      (3000, "WEB", "WEB-2", "A", 1)])        # dips to 8 again, same day, stays low
 
 
 def test_low_stock_alert_is_edge_triggered_with_cooldown():
     master = make_master([{"sku": "A", "on_hand_open": 9, "reorder_point": 8}])
-    feed = make_feed([(100, "WEB", "WEB-1", "A", 1, 30.0),   # dips to 8, cancelled after 30 min
-                      (3000, "WEB", "WEB-2", "A", 1)])        # dips to 8 again, same day
-    engine = simulate(master, make_listings(["A"]), feed, make_rules(), "engine")
-    assert engine.metrics["alerts"] == 1
-    assert engine.metrics["cooldown_suppressed"] == 1
-    assert engine.metrics["level_alerts"] > engine.metrics["alerts"]
+    engine = simulate(master, make_listings(["A"]), low_stock_feed(), make_rules(), "engine")
+    assert engine.metrics["alerts"] == 1               # second crossing falls inside the 24h cooldown
+    assert engine.metrics["cooldown_suppressed"] >= 1
+
+
+def test_held_back_alert_fires_after_cooldown():
+    master = make_master([{"sku": "A", "on_hand_open": 9, "reorder_point": 8}])
+    rules = make_rules()
+    rules["horizon_days"] = 2
+    engine = simulate(master, make_listings(["A"]), low_stock_feed(), rules, "engine")
+    assert engine.metrics["alerts"] == 2               # still low after 24h -> alerted again, once
+    gap = engine.alerts["ts"].diff().dropna().dt.total_seconds().iloc[0]
+    assert gap >= 24 * 3600
 
 
 def test_reconciliation_heals_silently_dropped_increase():

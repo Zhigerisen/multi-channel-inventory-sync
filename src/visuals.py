@@ -93,7 +93,8 @@ SHORT = {"once a day (by hand)": "Once a day\n(by hand)", "every 4 hours": "Ever
 
 
 def bars(ax_, comp: pd.DataFrame, label_size=11):
-    labels = [SHORT.get(s, s) for s in comp["stock sync"]]
+    comp = comp[~comp["stock sync"].str.contains("slower")]   # stress row is reported separately
+    labels =[SHORT.get(s, s) for s in comp["stock sync"]]
     vals = comp["oversold orders"].to_numpy()
     colors = [RED] * (len(vals) - 1) + [ACCENT]
     ax_.bar(range(len(vals)), vals, color=colors, width=0.62)
@@ -114,17 +115,17 @@ def bars(ax_, comp: pd.DataFrame, label_size=11):
 def s01_cover(d):
     hl = d["hl"]
     fig, ax = new_fig(16, 12)
-    txt(ax, 0.07, 0.915, "GOOGLE SHEETS  .  PYTHON  .  REST API  .  INVENTORY OPS", color=ACCENT,
+    txt(ax, 0.07, 0.915, "GOOGLE SHEETS  .  PYTHON  .  EVENT-DRIVEN SYNC  .  INVENTORY OPS", color=ACCENT,
         size=16, bold=True, family=MONO)
     txt(ax, 0.07, 0.83, "10,000 SKUs. 3 Sales Channels.", size=50, bold=True, va="top")
     txt(ax, 0.07, 0.735, "Zero Oversells.", color=ACCENT, size=50, bold=True, va="top")
-    txt(ax, 0.07, 0.645, "Stock is reserved the moment an order lands and pushed to every channel in seconds;",
+    txt(ax, 0.07, 0.645, "60-day simulation: every stock change is pushed to every channel within seconds;",
         color=MUTE, size=18, va="top")
     txt(ax, 0.07, 0.61, "reorders, low-stock alerts and nightly reconciliation run on their own.",
         color=MUTE, size=18, va="top")
     chips = [("10,000", "SKUs in sync"),
-             (f"{hl['oversold_before_daily_sync']} → 0", "oversold orders, 60 days"),
-             (f"{hl['order_events'] / 1000:,.0f}k", "order events processed"),
+             (f"{hl['oversold_before_daily_sync']} → 0", "oversold orders vs daily update"),
+             (f"{hl['oversold_before_15min_sync']} → 0", "vs a 15-minute sync"),
              (f"{hl['pos_drafted']:,}", "supplier PO drafts")]
     cw, gap, x0, y0, chh = 0.205, 0.015, 0.07, 0.40, 0.14
     for i, (big, lab) in enumerate(chips):
@@ -135,7 +136,8 @@ def s01_cover(d):
     card(ax, 0.07, 0.06, 0.86, 0.29, fc=CARD2)
     txt(ax, 0.09, 0.325, "OVERSOLD ORDERS IN 60 DAYS, BY HOW STOCK IS SYNCED", size=14, bold=True, va="top")
     bars(fig.add_axes([0.11, 0.115, 0.78, 0.165]), d["comp"], label_size=10)
-    txt(ax, 0.93, 0.035, "Demo on a synthetic dataset", color="#5b6b84", size=11, ha="right")
+    txt(ax, 0.93, 0.03, "Demo on a synthetic dataset  |  channel APIs simulated", color=MUTE, size=14,
+        ha="right", bold=True)
     save(fig, "01-cover.png")
 
 
@@ -166,9 +168,10 @@ def s03_race(d):
         (0.38, "10:00:12", "push: Marketplace A\nqty 3 -> 1", ACCENT),
         (0.62, "10:01:00", "buyer sees 1 unit\ncannot order 2", ACCENT),
         (0.86, "NO OVERSELL", "listings match\nreal stock", ACCENT)], ACCENT)
-    txt(ax, 0.5, 0.055, f"Measured on the same 60-day order stream: {hl['oversold_before_daily_sync']} oversold "
+    txt(ax, 0.5, 0.055, f"Same simulated 60-day order stream: {hl['oversold_before_daily_sync']} oversold "
         f"orders with a daily stock update, {hl['oversold_before_15min_sync']} with a 15-minute sync, "
-        f"{hl['oversold_after']} with the engine.", color=WHITE, size=13, ha="center", bold=True)
+        f"{hl['oversold_after']} with the engine ({hl['oversold_after_stress']} if pushes were "
+        f"{hl['stress_latency_multiplier']}x slower).", color=WHITE, size=12.5, ha="center", bold=True)
     save(fig, "03-race.png")
 
 
@@ -176,7 +179,8 @@ def s04_before_after(d):
     hl, daily = d["hl"], d["daily"]
     fig, ax = new_fig()
     kicker(ax, "BEFORE vs AFTER  (one order stream, 156,057 events, 60 days)")
-    heading(ax, f"Oversold orders: {hl['oversold_before_daily_sync']} → 0, while selling more", size=27)
+    heading(ax, f"Oversold orders: {hl['oversold_before_daily_sync']} → 0 with the same sales volume",
+            size=27)
     card(ax, 0.04, 0.30, 0.44, 0.47)
     txt(ax, 0.06, 0.745, "Oversold orders by sync strategy", size=14, bold=True)
     bars(fig.add_axes([0.06, 0.37, 0.40, 0.33]), d["comp"])
@@ -195,17 +199,19 @@ def s04_before_after(d):
         s.set_color(GRID)
     lax.legend(facecolor=CARD, edgecolor=GRID, labelcolor=WHITE, fontsize=10, loc="upper right")
     TEXTS.extend(["stock updated once a day", "sync every 15 min", "this engine", "day of the 60-day run"])
-    stats = [(f"+{hl['extra_units_sold_vs_daily']:,}", "more units sold vs daily update"),
-             (f"{hl['phantom_units_before']:,}", "units no longer locked by duplicate webhooks"),
-             (f"${hl['cancel_cost_avoided_low'] / 1000:,.1f}k-{hl['cancel_cost_avoided_high'] / 1000:,.1f}k",
-              "cancellation cost avoided (60 days)")]
+    stats = [(f"{hl['oversold_before_15min_sync']} → 0", "vs a 15-minute scheduled sync"),
+             (f"{hl['oversold_after_stress']}",
+              f"stress test: every push {hl['stress_latency_multiplier']}x slower"),
+             (f"${hl['cancel_cost_avoided_vs_daily_low'] / 1000:,.1f}k-"
+              f"{hl['cancel_cost_avoided_vs_daily_high'] / 1000:,.1f}k",
+              "cancellation cost vs daily update*")]
     for i, (big, lab) in enumerate(stats):
         x0 = 0.04 + i * 0.31
         card(ax, x0, 0.08, 0.29, 0.17)
         txt(ax, x0 + 0.145, 0.185, big, color=ACCENT, size=26, bold=True, ha="center")
         txt(ax, x0 + 0.145, 0.115, lab, color=MUTE, size=12, ha="center")
-    txt(ax, 0.96, 0.035, r"Cost per cancelled order: \$41.77-\$105.63 industry benchmark (nventory.io). "
-        "Synthetic demo data.", color="#5b6b84", size=10, ha="right")
+    txt(ax, 0.96, 0.035, r"*At \$41.77-\$105.63 per cancelled order, a vendor-published estimate (nventory.io). "
+        "Simulated order stream, synthetic data.", color=MUTE, size=11.5, ha="right")
     save(fig, "04-before-after.png")
 
 
@@ -263,8 +269,8 @@ def s06_po_alerts(d):
         y -= 0.065
     txt(ax, 0.55, 0.17, "Edge-triggered: one alert per crossing, then quiet for 24h.", color="#64748b", size=11)
     txt(ax, 0.5, 0.06, f"60 days: {hl['pos_drafted']:,} PO drafts ({hl['po_lines']:,} lines)  |  "
-        f"{hl['alerts']:,} alerts in {hl['alert_digests']:,} digests instead of "
-        f"{hl['level_alerts'] / 1e6:,.1f}M repeated 'still low' pings", size=13, bold=True, ha="center")
+        f"{hl['alerts']:,} alerts in {hl['alert_digests']:,} digests, one per reorder-point crossing",
+        size=13, bold=True, ha="center")
     save(fig, "06-po-alerts.png")
 
 
@@ -322,10 +328,13 @@ def s08_architecture(d):
     box(ax, 0.32, 0.30, 0.34, 0.43, "Sync engine (Python)", [
         "1. idempotency check (channel order id)",
         "2. reserve in append-only ledger",
-        "3. available = on hand - reserved - buffer",
+        "3. available = on hand - reserved",
         "4. push qty to every channel in seconds",
-        "5. read-back on decreases, retry",
-        "6. audit log of every change"], ec=ACCENT, fc="#13261f")
+        "5. coalesce pushes per listing",
+        "6. audit log of every change",
+        "",
+        "channel APIs simulated in this demo:",
+        "push latency 3-25 s per channel"], ec=ACCENT, fc="#13261f")
     box(ax, 0.75, 0.55, 0.21, 0.18, "Google Sheets", ["inventory master (10k SKUs)", "live dashboard + KPIs",
                                                       "PO drafts, alerts, audit"])
     box(ax, 0.75, 0.30, 0.21, 0.19, "Nightly job", ["supplier PO drafts (ROP/EOQ)", "ledger audit",
@@ -334,10 +343,10 @@ def s08_architecture(d):
     for k in range(3):
         yc = 0.665 - k * 0.165
         arrow(ax, (0.23, yc), (0.32, 0.52 + (1 - k) * 0.06), both=True)
-    arrow(ax, (0.66, 0.6), (0.75, 0.63), both=True)
+    arrow(ax, (0.66, 0.6), (0.75, 0.63))
     arrow(ax, (0.66, 0.4), (0.75, 0.4))
     arrow(ax, (0.49, 0.30), (0.49, 0.24))
-    for k, f in enumerate(["available = on_hand - reserved - buffer",
+    for k, f in enumerate(["available = on_hand - reserved",
                            "reorder point = d x L + Z x sigma x sqrt(L)",
                            "EOQ = sqrt(2 x D x S / H)"]):
         txt(ax, 0.04 + k * 0.32, 0.045, f, color=ACCENT, size=12, family=MONO)
@@ -371,7 +380,7 @@ def main() -> None:
     for fn in (s01_cover, s03_race, s04_before_after, s06_po_alerts, s07_recon, s08_architecture):
         fn(d)
     sheet_slide("sheet-dashboard.png", "02-live-dashboard.png", "LIVE GOOGLE SHEET  -  DASHBOARD",
-                "Every tile is a formula over the 10,000-row inventory tab")
+                "Stock KPIs and SKU statuses are live formulas over 10,000 rows")
     sheet_slide("sheet-inventory.png", "05-live-inventory.png", "LIVE GOOGLE SHEET  -  INVENTORY",
                 "Available, status and per-channel qty for every SKU")
     pngs = sorted(f for f in os.listdir(SCREENS) if f.endswith(".png"))

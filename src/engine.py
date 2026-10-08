@@ -1,20 +1,17 @@
 """Event-driven multi-channel inventory simulation: one order stream, two sync strategies.
 
-mode="naive"   What most stores run today: a scheduled job pushes the SAME available qty
-               to every channel every N minutes; order webhooks are not de-duplicated.
-mode="engine"  This project's sync engine:
-               - reservation at order intake into an append-only ledger
-                 (idempotency key = channel order id, re-delivered webhooks ignored)
-               - event-time push to each channel (per-channel latency, pushes coalesced)
-               - publish buffer on hot SKUs, last units sold only on the fastest channel,
-                 offer cap on the strictest marketplace
-               - qty decreases confirmed by read-back; increases best-effort (may drop silently)
-               - edge-triggered low-stock alerts with cooldown, one digest per cycle
-               - nightly PO drafts (reorder point / EOQ) + reconciliation sweep that
-                 checks the ledger and heals channels whose qty drifted
+mode="naive"   Scheduled sync: a job pushes the SAME available qty to every channel every N minutes.
+mode="engine"  This project's sync engine: event-time push of each change to every channel
+               (per-channel latency, pushes coalesced per listing), edge-triggered low-stock alerts
+               with cooldown, and a nightly reconciliation sweep that audits the ledger and heals
+               channel qty that drifted (an increase push may silently fail in the model).
+               Optional policies in rules.yaml (off by default): publish buffer on hot SKUs,
+               last units only on the fastest channel, per-channel offer cap.
 
-Both modes share stock, buyer behaviour, shipments, returns and replenishment, so the only
-difference measured between them is the sync strategy.
+Shared by BOTH modes, so the before/after difference is the sync strategy only: the same order
+stream, reservation at order intake into an append-only ledger, idempotency per channel order id
+(re-delivered webhooks ignored), buyer cancels, shipments, returns and nightly PO drafting.
+Channel APIs are simulated: a qty push lands after the channel's latency; decreases always land.
 """
 from __future__ import annotations
 
@@ -28,15 +25,15 @@ import pandas as pd
 from common import DAY, channel_table, start_dt
 
 PUSH, CANCEL, SHIP, RETURN, RECEIPT = 0, 1, 2, 3, 4
-OPEN, SHIPPED, CANCELLED, PHANTOM = 0, 1, 2, 3
-STATUS = {OPEN: "OPEN", SHIPPED: "SHIPPED", CANCELLED: "CANCELLED", PHANTOM: "PHANTOM"}
+OPEN, SHIPPED, CANCELLED = 0, 1, 2
+STATUS = {OPEN: "OPEN", SHIPPED: "SHIPPED", CANCELLED: "CANCELLED"}
 METRIC_KEYS = [
     "order_events", "duplicate_events", "orders_created", "accepted_orders", "accepted_units",
     "revenue", "oversold_orders", "oversold_units", "lost_orders", "lost_units",
-    "dup_ignored", "phantom_reservations", "phantom_locked_units", "cancels", "shipped_units",
+    "dup_ignored", "cancels", "shipped_units",
     "returns", "pos_drafted", "po_lines", "po_units", "receipts", "receipt_units", "sync_runs",
     "pushes_sent", "pushes_dropped", "suppress_events", "relist_events", "alerts",
-    "alert_digests", "level_alerts", "cooldown_suppressed", "drifts_caught",
+    "alert_digests", "cooldown_suppressed", "drifts_caught",
     "hidden_units_restored", "ledger_mismatches",
 ]
 
@@ -192,7 +189,7 @@ class Sim:
         if key in self.seen:
             self.m["duplicate_events"] += 1
             if key in self.created:
-                self.on_duplicate(t, c, s, q, key)
+                self.on_duplicate(t, s, key)
             return
         self.seen.add(key)
         d = self.day(t)
@@ -228,15 +225,9 @@ class Sim:
         self.daily["revenue"][d] += q * self.price[s]
         self.sync_sku(s, t)
 
-    def on_duplicate(self, t: float, c: int, s: int, q: int, key: str) -> None:
-        if self.mode == "engine":
-            self.m["dup_ignored"] += 1
-            self.log(t, "DUPLICATE_IGNORED", s, "reserved", int(self.reserved[s]), int(self.reserved[s]), key)
-            return
-        if q <= self.on_hand[s] - self.reserved[s]:
-            self.reserve(t, c, s, q, key, PHANTOM)
-            self.m["phantom_reservations"] += 1
-            self.m["phantom_locked_units"] += q
+    def on_duplicate(self, t: float, s: int, key: str) -> None:
+        self.m["dup_ignored"] += 1
+        self.log(t, "DUPLICATE_IGNORED", s, "reserved", int(self.reserved[s]), int(self.reserved[s]), key)
 
     def on_push(self, t: float, c: int, s: int) -> None:
         self.pending[c, s] = False
@@ -313,7 +304,6 @@ class Sim:
         below = (ats <= self.rop) & self.mover
         cross = below & ~self.was_below
         ok = cross & (t - self.last_alert >= self.cooldown)
-        self.m["level_alerts"] += int(below.sum())
         self.m["cooldown_suppressed"] += int((cross & ~ok).sum())
         hits = np.flatnonzero(ok)
         if hits.size:
@@ -323,7 +313,8 @@ class Sim:
             self.last_alert[hits] = t
             for s in hits:
                 self.alerts.append((t, int(s), int(ats[s]), int(self.rop[s]), int(self.on_order[s])))
-        self.was_below = below
+        # a crossing held back by the cooldown stays "un-alerted" so it fires once the cooldown ends
+        self.was_below = below & (self.was_below | ok)
 
     def on_nightly(self, t: float) -> None:
         """(s, Q) policy: when stock position (available + on order) is at/below the reorder

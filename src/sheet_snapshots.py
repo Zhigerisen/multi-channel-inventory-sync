@@ -1,6 +1,6 @@
 """Snapshot tabs of the live Google Sheet WITHOUT a browser.
 
-    python src/sheet_snapshots.py
+    python src/sheet_snapshots.py [spreadsheet id]
 
 Google renders the sheet itself (formats, status colours, charts) through the spreadsheet
 PDF export endpoint; the PDF page is rasterised with PyMuPDF and the white margin trimmed.
@@ -9,6 +9,7 @@ Writes screens/sheet-dashboard.png and screens/sheet-inventory.png.
 from __future__ import annotations
 
 import os
+import sys
 
 import fitz
 import gspread
@@ -26,12 +27,12 @@ SHOTS = [  # (tab, range, output, gridlines)
 ]
 
 
-def export_pdf(token: str, gid: int, rng: str, gridlines: str) -> bytes:
+def export_pdf(sheet_id: str, token: str, gid: int, rng: str, gridlines: str) -> bytes:
     params = {"format": "pdf", "gid": gid, "range": rng, "portrait": "false", "fitw": "true",
               "size": "A4", "gridlines": gridlines, "sheetnames": "false", "printtitle": "false",
               "pagenum": "UNDEFINED", "top_margin": "0.2", "bottom_margin": "0.2",
               "left_margin": "0.2", "right_margin": "0.2"}
-    r = requests.get(f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export", params=params,
+    r = requests.get(f"https://docs.google.com/spreadsheets/d/{sheet_id}/export", params=params,
                      headers={"Authorization": f"Bearer {token}"}, timeout=120)
     r.raise_for_status()
     if not r.content.startswith(b"%PDF"):
@@ -52,16 +53,16 @@ def pdf_to_png(pdf: bytes, path: str, zoom: float = 2.5) -> tuple[int, int]:
     return img.size
 
 
-def main() -> None:
+def main(sheet_id: str) -> None:
     creds = Credentials.from_service_account_file(CREDS, scopes=SCOPES)
     creds.refresh(Request())
-    sh = gspread.authorize(creds).open_by_key(SHEET_ID)
+    sh = gspread.authorize(creds).open_by_key(sheet_id)
     os.makedirs(SCREENS, exist_ok=True)
     for tab, rng, out, grid in SHOTS:
-        pdf = export_pdf(creds.token, sh.worksheet(tab).id, rng, grid)
+        pdf = export_pdf(sheet_id, creds.token, sh.worksheet(tab).id, rng, grid)
         size = pdf_to_png(pdf, os.path.join(SCREENS, out))
         print(f"[OK] {tab} {rng} -> screens/{out} {size[0]}x{size[1]}")
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1] if len(sys.argv) > 1 else SHEET_ID)

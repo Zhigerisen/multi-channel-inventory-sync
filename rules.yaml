@@ -49,10 +49,11 @@ events:
 engine:
   naive_sync_minutes: 15          # baseline: snapshot push every N minutes (overridden per baseline)
   baselines_minutes: [1440, 240, 60, 15]   # 1440 = stock updated once a day (spreadsheet by hand)
-  hot_sku_daily_units: 6          # SKUs selling >= this get a publish buffer
-  publish_buffer_units: 1         # held back on hot SKUs to absorb push latency
-  # Optional policy, OFF: measured on this dataset it cut sell-through ~1% without
-  # removing any further oversells (event-time reservation alone already reaches 0).
+  stress_latency_multiplier: 20   # stress run: every channel push takes 20x longer (1-8 min)
+  # Optional policies, all OFF: measured on this dataset they cost sales without removing
+  # further oversells (event-time push alone already reaches 0 at the configured latency).
+  hot_sku_daily_units: 6          # SKUs selling >= this count as "hot"
+  publish_buffer_units: 0         # units held back on hot SKUs to absorb push latency
   last_units_fast_channel_only: 0 # at <= N units left, only the lowest-latency channel keeps selling
   alert_digest_minutes: 15        # low-stock digest cadence
   alert_cooldown_hours: 24        # no repeat alert for the same SKU inside this window

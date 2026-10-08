@@ -5,4 +5,7 @@ openpyxl>=3.1
 matplotlib>=3.8
 gspread>=6.0
 google-auth>=2.30
+requests>=2.31
+PyMuPDF>=1.24
+Pillow>=10.0
 pytest>=8.0

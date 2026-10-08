@@ -27,7 +27,7 @@ CREDS = os.environ.get("GOOGLE_CREDENTIALS", os.path.expanduser("~/.claude/googl
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 CHUNK = 2500
 # SKU, Product, Category, Supplier, 6 stock columns, Status, 3 channel columns, cost, price, value
-INVENTORY_WIDTHS = [84, 220, 140, 74] + [90] * 6 + [90] + [112] * 3 + [80, 80, 96]
+INVENTORY_WIDTHS = [84, 250, 140, 74] + [90] * 6 + [90] + [112] * 3 + [80, 80, 96]
 SAMPLE = 3000
 TABS = ["Dashboard", "Inventory", "Before vs After", "Daily", "PO Drafts", "Low-Stock Alerts",
         "Reservations", "Reconciliation", "Audit Log", "Run Summary", "READ ME"]
@@ -106,9 +106,9 @@ def dashboard(sh, hl: dict) -> None:
         ["=COUNTA(Inventory!A2:A)", "", "=SUM(Inventory!G2:G)", "", "=SUM(Inventory!Q2:Q)", "",
          '=COUNTIF(Inventory!K2:K,"LOW")+COUNTIF(Inventory!K2:K,"REORDER")', "",
          '=COUNTIF(Inventory!K2:K,"OUT")', "", v("pos_drafted"), ""],
-        ["Oversold orders: daily sync", "", "Oversold orders: engine", "", "Phantom units blocked", "",
+        ["Oversold orders: daily sync", "", "Oversold orders: engine", "", "Duplicate webhooks ignored", "",
          "Channel drifts healed", "", "Low-stock alerts", "", "Order events processed", ""],
-        [v("oversold_before_daily_sync"), "", v("oversold_after"), "", v("phantom_units_before"), "",
+        [v("oversold_before_daily_sync"), "", v("oversold_after"), "", v("duplicate_webhooks_ignored"), "",
          v("drifts_healed"), "", v("alerts"), "", v("order_events"), ""],
         [],
         ["Sales channels", "", "", "", "", "", "Needs attention: lowest stock vs reorder point"],
@@ -121,7 +121,7 @@ def dashboard(sh, hl: dict) -> None:
         [],
         ["Oversold orders by sync strategy", "", "", "", ""],
         ["Stock sync", "Oversold orders", "Units sold", "", ""],
-        *[[f"='Before vs After'!B{k}", f"='Before vs After'!C{k}", f"='Before vs After'!F{k}"] for k in range(2, 7)],
+        *[[f"='Before vs After'!B{k}", f"='Before vs After'!C{k}", f"='Before vs After'!E{k}"] for k in range(2, 8)],
     ]
     ws.update(range_name="A1", values=cells, value_input_option="USER_ENTERED")
     sid = ws.id
@@ -158,7 +158,8 @@ def dashboard(sh, hl: dict) -> None:
              fmt(sid, 9, 10, 6, 11, {"backgroundColor": DARK, "textFormat": {"bold": True, "foregroundColor": WHITE}}),
              fmt(sid, 15, 16, 0, 3, {"backgroundColor": DARK, "textFormat": {"bold": True, "foregroundColor": WHITE}}),
              fmt(sid, 10, 13, 1, 4, {"numberFormat": {"type": "NUMBER", "pattern": "#,##0"}}),
-             fmt(sid, 16, 21, 1, 3, {"numberFormat": {"type": "NUMBER", "pattern": "#,##0"}}),
+             fmt(sid, 16, 22, 1, 3, {"numberFormat": {"type": "NUMBER", "pattern": "#,##0"}}),
+             fmt(sid, 21, 22, 0, 3, {"textFormat": {"italic": True, "foregroundColor": rgb("#64748b")}}),
              fmt(sid, 20, 21, 0, 3, {"backgroundColor": rgb("#e8faf2"), "textFormat": {"bold": True}}),
              {"updateSheetProperties": {"properties": {"sheetId": sid, "gridProperties": {"hideGridlines": True}},
                                         "fields": "gridProperties.hideGridlines"}}]
@@ -240,14 +241,16 @@ def readme(hl: dict) -> list[list]:
         ["What this is", "A 10,000-SKU catalogue sold on 3 channels. One 60-day order stream "
                          f"({hl['order_events']:,} events) was run through two ways of syncing stock:"],
         ["", "1) a scheduled job pushing the same qty to every channel (once a day ... every 15 min)"],
-        ["", "2) this engine: reserve at order intake, push each change to every channel in seconds,"],
-        ["", "   ignore re-delivered webhooks, alert on low stock, draft supplier POs, reconcile nightly."],
+        ["", "2) this engine: push each stock change to every channel within seconds."],
+        ["", "Both share reservation at intake, webhook de-duplication and nightly PO drafts."],
         ["Result", f"Oversold orders: {hl['oversold_before_daily_sync']} with a daily sync, "
                    f"{hl['oversold_before_15min_sync']} with a 15-minute sync, "
-                   f"{hl['oversold_after']} with the engine."],
-        ["Live formulas", "Inventory > Available and Status, and every Dashboard tile, are formulas. "
-                          "Edit an On hand value and watch status/KPIs update."],
-        ["Data", "100% SYNTHETIC (fixed random seed). No real brands, stores, customers or orders."],
+                   f"{hl['oversold_after']} with the engine (push latency {hl['push_latency_sec']} s), "
+                   f"{hl['oversold_after_stress']} if pushes were {hl['stress_latency_multiplier']}x slower."],
+        ["Live formulas", "Inventory > Available and Status and the stock KPI tiles are formulas over the "
+                          "Inventory tab; run metrics (oversells, alerts...) come from the engine run."],
+        ["Data", "100% SYNTHETIC (fixed random seed). No real brands, stores, customers or orders. "
+                 "Channel APIs are simulated; this sheet is the published result of the run."],
         ["Source code", REPO],
         ["Samples", f"Reservations / Audit Log tabs show the latest {SAMPLE:,} rows; the full ledger "
                     "and audit log are CSV files in the repository."],
@@ -281,7 +284,8 @@ def main(target: str) -> None:
     comp = ba["Comparison"].copy()
     comp["stock sync"] = comp["stock sync"].replace({
         "once a day (by hand)": "daily, by hand", "every 15 minutes": "every 15 min",
-        "event-time reservation + push": "this engine"})
+        "event-time reservation + push": "this engine"}).str.replace(
+        r"^pushes (\d+)x slower$", r"stress: \1x slower", regex=True)
     put(sh, "Before vs After", values(comp))
     daily_ws = put(sh, "Daily", values(ba["Daily"]))
     sh.batch_update({"requests": [fmt(daily_ws.id, 1, daily_ws.row_count, 0, 1,

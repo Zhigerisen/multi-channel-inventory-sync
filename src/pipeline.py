@@ -39,7 +39,7 @@ def timed(fn, *args):
     return res, round(time.time() - t, 1)
 
 
-def run_all(master, listings, feed, rules) -> tuple[SimResult, dict, SimResult, dict]:
+def run_all(master, listings, feed, rules) -> tuple[SimResult, dict, SimResult, SimResult, dict]:
     baselines, runtimes = {}, {}
     for minutes in rules["engine"]["baselines_minutes"]:
         r = copy.deepcopy(rules)
@@ -50,10 +50,16 @@ def run_all(master, listings, feed, rules) -> tuple[SimResult, dict, SimResult, 
     engine, runtimes["engine"] = timed(simulate, master, listings, feed, rules, "engine")
     print(f"[OK] engine: oversold orders {engine.metrics['oversold_orders']:,} "
           f"({runtimes['engine']}s for {len(feed):,} events)")
+    k = rules["engine"]["stress_latency_multiplier"]
+    slow = copy.deepcopy(rules)
+    for cid in slow["channels"]:
+        slow["channels"][cid][2] *= k
+    stress, runtimes["engine_stress"] = timed(simulate, master, listings, feed, slow, "engine")
+    print(f"[OK] engine stress (push latency x{k}): oversold orders {stress.metrics['oversold_orders']:,}")
     replay_feed = pd.concat([feed, feed], ignore_index=True).sort_values("ts", kind="stable")
     replay, runtimes["replay"] = timed(simulate, master, listings, replay_feed, rules, "engine")
     print(f"[OK] replay (feed delivered twice): {len(replay_feed):,} events")
-    return engine, baselines, replay, runtimes
+    return engine, baselines, replay, stress, runtimes
 
 
 def check_invariants(engine: SimResult, replay: SimResult, rules: dict) -> dict:
@@ -61,7 +67,7 @@ def check_invariants(engine: SimResult, replay: SimResult, rules: dict) -> dict:
     led = engine.ledger
     open_res = led[led.status == "OPEN"].groupby("sku")["qty"].sum()
     res_by_sku = st.set_index("sku")["reserved"]
-    offered_ok = all(((st[f"offered_{c}"] <= st["available"]) | (st[f"offered_{c}"] < 0)).all()
+    showing_ok = all(((st[f"showing_{c}"] <= st["available"]) | (st[f"showing_{c}"] < 0)).all()
                      for c in rules["channels"])
     alerts = engine.alerts.sort_values(["sku", "ts"])
     gaps = alerts.groupby("sku")["ts"].diff().dt.total_seconds().dropna()
@@ -73,7 +79,7 @@ def check_invariants(engine: SimResult, replay: SimResult, rules: dict) -> dict:
             (open_res.reindex(res_by_sku.index, fill_value=0) == res_by_sku).all()),
         "nightly ledger audits found 0 mismatches": m["ledger_mismatches"] == 0,
         "no negative available / reserved": bool((st["available"] >= 0).all() and (st["reserved"] >= 0).all()),
-        "no channel offered more than available": offered_ok,
+        "no channel shows more than available (end of run)": showing_ok,
         "replay of full feed changes nothing": all(
             replay.metrics[k] == m[k] for k in ("accepted_orders", "accepted_units", "oversold_orders")),
         # replay doubles every event, incl. the feed's own re-deliveries: each created order
@@ -91,10 +97,11 @@ def check_invariants(engine: SimResult, replay: SimResult, rules: dict) -> dict:
     return checks
 
 
-def headline(engine: SimResult, baselines: dict, master: pd.DataFrame, listings: pd.DataFrame,
-             feed: pd.DataFrame, rules: dict) -> dict:
+def headline(engine: SimResult, baselines: dict, stress: SimResult, master: pd.DataFrame,
+             listings: pd.DataFrame, feed: pd.DataFrame, rules: dict) -> dict:
     m = engine.metrics
     daily_b, fast_b = baselines[max(baselines)], baselines[min(baselines)]
+    lat = [v[2] for v in rules["channels"].values()]
     st = engine.state.merge(master[["sku", "cost"]], on="sku")
     status = st["status"].value_counts().to_dict()
     return {
@@ -104,28 +111,27 @@ def headline(engine: SimResult, baselines: dict, master: pd.DataFrame, listings:
         "oversold_units_before_daily_sync": daily_b.metrics["oversold_units"],
         "oversold_before_15min_sync": fast_b.metrics["oversold_orders"],
         "oversold_after": m["oversold_orders"],
-        "phantom_units_before": daily_b.metrics["phantom_locked_units"],
+        "push_latency_sec": f"{min(lat):g}-{max(lat):g}",
+        "stress_latency_multiplier": rules["engine"]["stress_latency_multiplier"],
+        "oversold_after_stress": stress.metrics["oversold_orders"],
         "duplicate_webhooks_ignored": m["dup_ignored"],
         "extra_units_sold_vs_daily": m["accepted_units"] - daily_b.metrics["accepted_units"],
-        "extra_revenue_vs_daily": round(m["revenue"] - daily_b.metrics["revenue"], 2),
-        "cancel_cost_avoided_low": round(daily_b.metrics["oversold_orders"] * CANCEL_COST[0], 0),
-        "cancel_cost_avoided_high": round(daily_b.metrics["oversold_orders"] * CANCEL_COST[1], 0),
+        "extra_units_sold_vs_15min": m["accepted_units"] - fast_b.metrics["accepted_units"],
+        "cancel_cost_avoided_vs_daily_low": round(daily_b.metrics["oversold_orders"] * CANCEL_COST[0], 0),
+        "cancel_cost_avoided_vs_daily_high": round(daily_b.metrics["oversold_orders"] * CANCEL_COST[1], 0),
         "drifts_healed": m["drifts_caught"], "hidden_units_restored": m["hidden_units_restored"],
         "pos_drafted": m["pos_drafted"], "po_lines": m["po_lines"], "po_units": m["po_units"],
-        "alerts": m["alerts"], "alert_digests": m["alert_digests"], "level_alerts": m["level_alerts"],
+        "alerts": m["alerts"], "alert_digests": m["alert_digests"],
         "suppress_events": m["suppress_events"], "relist_events": m["relist_events"],
-        "pushes_engine": m["pushes_sent"], "pushes_daily_baseline": daily_b.metrics["pushes_sent"],
-        "pushes_15min_baseline": fast_b.metrics["pushes_sent"],
         "status_end": {k: int(v) for k, v in status.items()},
         "inventory_value_end": round(float((st["on_hand"] * st["cost"]).sum()), 2),
     }
 
 
-def comparison(engine: SimResult, baselines: dict) -> pd.DataFrame:
+def comparison(engine: SimResult, baselines: dict, stress: SimResult, rules: dict) -> pd.DataFrame:
     def row(name, sync, mm):
         return {"strategy": name, "stock sync": sync,
                 "oversold orders": mm["oversold_orders"], "oversold units": mm["oversold_units"],
-                "phantom-locked units": mm["phantom_locked_units"],
                 "units sold": mm["accepted_units"], "revenue USD": round(mm["revenue"], 2),
                 "cancel cost USD (low)": round(mm["oversold_orders"] * CANCEL_COST[0], 0),
                 "cancel cost USD (high)": round(mm["oversold_orders"] * CANCEL_COST[1], 0)}
@@ -133,6 +139,8 @@ def comparison(engine: SimResult, baselines: dict) -> pd.DataFrame:
     rows = [row("Scheduled snapshot", labels.get(k, f"every {k} min"), b.metrics)
             for k, b in sorted(baselines.items(), reverse=True)]
     rows.append(row("This engine", "event-time reservation + push", engine.metrics))
+    k = rules["engine"]["stress_latency_multiplier"]
+    rows.append(row("This engine, stress test", f"pushes {k}x slower", stress.metrics))
     return pd.DataFrame(rows)
 
 
@@ -171,7 +179,7 @@ def write_xlsx(path: str, sheets: dict[str, pd.DataFrame]) -> None:
                 ws.column_dimensions[col[0].column_letter].width = min(max(width + 2, 8), 48)
 
 
-def write_outputs(engine, baselines, master, rules, checks, hl, runtimes) -> None:
+def write_outputs(engine, baselines, stress, master, rules, checks, hl, runtimes) -> None:
     os.makedirs(OUT, exist_ok=True)
     st = master[["sku", "name", "category", "supplier_id", "lead_time_days", "cost", "price",
                  "avg_daily_demand", "safety_stock", "eoq"]].merge(engine.state, on="sku")
@@ -187,12 +195,13 @@ def write_outputs(engine, baselines, master, rules, checks, hl, runtimes) -> Non
                {"Drifts healed": engine.drifts, "Invariant checks": recon})
     audit_frame(engine, rules).to_csv(os.path.join(OUT, "06_Audit_Log.csv.gz"), index=False)
     write_xlsx(os.path.join(OUT, "07_Before_vs_After.xlsx"), {
-        "Comparison": comparison(engine, baselines),
+        "Comparison": comparison(engine, baselines, stress, rules),
         "Daily": daily_table(engine, baselines),
         "Oversells prevented": baselines[max(baselines)].oversells,
     })
     metrics = {"headline": hl, "engine": engine.metrics,
                "baselines": {str(k): b.metrics for k, b in baselines.items()},
+               "engine_stress": stress.metrics,
                "checks": checks, "runtime_sec": runtimes}
     with open(os.path.join(OUT, "metrics.json"), "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2, default=lambda o: o.item() if hasattr(o, "item") else str(o))
@@ -203,13 +212,16 @@ def main() -> None:
     t = time.time()
     rules = load_rules()
     master, listings, feed = load_data()
-    engine, baselines, replay, runtimes = run_all(master, listings, feed, rules)
+    engine, baselines, replay, stress, runtimes = run_all(master, listings, feed, rules)
     checks = check_invariants(engine, replay, rules)
-    hl = headline(engine, baselines, master, listings, feed, rules)
-    write_outputs(engine, baselines, master, rules, checks, hl, runtimes)
-    print(f"[OK] oversold orders: {hl['oversold_before_daily_sync']} (daily sync) -> "
-          f"{hl['oversold_after']} (engine); sold +{hl['extra_units_sold_vs_daily']:,} units "
-          f"(+{pct(hl['extra_units_sold_vs_daily'], baselines[max(baselines)].metrics['accepted_units'])}%)")
+    hl = headline(engine, baselines, stress, master, listings, feed, rules)
+    write_outputs(engine, baselines, stress, master, rules, checks, hl, runtimes)
+    print(f"[OK] oversold orders: {hl['oversold_before_daily_sync']} (daily) / "
+          f"{hl['oversold_before_15min_sync']} (15 min) -> {hl['oversold_after']} (engine), "
+          f"{hl['oversold_after_stress']} (engine, pushes x{hl['stress_latency_multiplier']} slower)")
+    print(f"[OK] units sold vs daily {hl['extra_units_sold_vs_daily']:+,} "
+          f"({pct(hl['extra_units_sold_vs_daily'], baselines[max(baselines)].metrics['accepted_units'])}%), "
+          f"vs 15 min {hl['extra_units_sold_vs_15min']:+,}")
     print(f"[OK] total {time.time() - t:.1f}s")
 
 
