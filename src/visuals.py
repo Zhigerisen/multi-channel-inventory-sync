@@ -344,11 +344,36 @@ def s08_architecture(d):
     save(fig, "08-architecture.png")
 
 
+def sheet_slide(src: str, name: str, kick: str, head: str) -> None:
+    """Frame a Google-rendered snapshot of the live sheet (see sheet_snapshots.py)."""
+    path = os.path.join(SCREENS, src)
+    if not os.path.exists(path):
+        print(f"[..] skip {name}: run src/sheet_snapshots.py first")
+        return
+    img = plt.imread(path)
+    fig, ax = new_fig()
+    kicker(ax, kick)
+    heading(ax, head, size=25)
+    box_w, box_h, top = 0.92, 0.72, 0.80
+    aspect = (img.shape[1] / img.shape[0]) * (10 / 16)
+    w = min(box_w, box_h * aspect)
+    h = w / aspect
+    x0 = (1 - w) / 2
+    card(ax, x0 - 0.008, top - h - 0.012, w + 0.016, h + 0.024, fc="#ffffff", ec=GRID)
+    fig.add_axes([x0, top - h, w, h]).imshow(img)
+    fig.axes[-1].set_axis_off()
+    save(fig, name)
+
+
 def main() -> None:
     os.makedirs(SCREENS, exist_ok=True)
     d = load()
     for fn in (s01_cover, s03_race, s04_before_after, s06_po_alerts, s07_recon, s08_architecture):
         fn(d)
+    sheet_slide("sheet-dashboard.png", "02-live-dashboard.png", "LIVE GOOGLE SHEET  -  DASHBOARD",
+                "Every tile is a formula over the 10,000-row inventory tab")
+    sheet_slide("sheet-inventory.png", "05-live-inventory.png", "LIVE GOOGLE SHEET  -  INVENTORY",
+                "Available, status and per-channel qty for every SKU")
     pngs = sorted(f for f in os.listdir(SCREENS) if f.endswith(".png"))
     print("[OK] rendered:", ", ".join(pngs))
     hits = sum(1 for s in TEXTS if CYRILLIC.search(s))

@@ -25,6 +25,8 @@ REPO = "https://github.com/Zhigerisen/multi-channel-inventory-sync"
 CREDS = r"C:\Users\zhiga\.claude\google-credentials.json"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 CHUNK = 2500
+# SKU, Product, Category, Supplier, 6 stock columns, Status, 3 channel columns, cost, price, value
+INVENTORY_WIDTHS = [84, 220, 140, 74] + [90] * 6 + [90] + [112] * 3 + [80, 80, 96]
 SAMPLE = 3000
 TABS = ["Dashboard", "Inventory", "Before vs After", "Daily", "PO Drafts", "Low-Stock Alerts",
         "Reservations", "Reconciliation", "Audit Log", "Run Summary", "READ ME"]
@@ -78,9 +80,9 @@ def put(sh, title: str, data: list[list], header_fmt: bool = True):
 
 
 def inventory_rows(df: pd.DataFrame) -> list[list]:
-    head =["SKU", "Product", "Category", "Supplier", "On hand", "Reserved", "Available", "On order",
-            "Reorder point", "EOQ", "Status", "Offered: Online Store", "Offered: Marketplace A",
-            "Offered: Marketplace B", "Unit cost", "Price", "Stock value"]
+    head = ["SKU", "Product", "Category", "Supplier", "On hand", "Reserved", "Available", "On order",
+            "Reorder pt", "EOQ", "Status", "Online Store", "Marketplace A", "Marketplace B",
+            "Unit cost", "Price", "Stock value"]
     rows = [head]
     for i, r in enumerate(df.itertuples(index=False), start=2):
         off = [("" if v < 0 else int(v)) for v in (r.offered_WEB, r.offered_MKA, r.offered_MKB)]
@@ -109,7 +111,7 @@ def dashboard(sh, hl: dict) -> None:
          v("drifts_healed"), "", v("alerts"), "", v("order_events"), ""],
         [],
         ["Sales channels", "", "", "", "", "", "Needs attention: lowest stock vs reorder point"],
-        ["Channel", "Listings", "Units offered", "Suppressed (0 qty)", "", "",
+        ["Channel", "Listings", "Units offered", "At 0 qty", "", "",
          "SKU", "Available", "Reorder point", "On order", "Status"],
         ["Online Store", "=COUNT(Inventory!L2:L)", "=SUM(Inventory!L2:L)", "=COUNTIF(Inventory!L2:L,0)", "", "",
          NEEDS_ATTENTION],
@@ -186,9 +188,9 @@ def inventory_formats(sh) -> None:
         fmt(sid, 1, n, 16, 17, {"numberFormat": {"type": "CURRENCY", "pattern": "$#,##0"}}),
         rule("OUT", "#fde2e1", "#b91c1c"), rule("REORDER", "#ffedd5", "#c2410c"),
         rule("LOW", "#fef3c7", "#a16207"), rule("ACTIVE", "#ecfdf5", "#047857"),
-        {"updateDimensionProperties": {"range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": 1,
-                                                 "endIndex": 2}, "properties": {"pixelSize": 260},
-                                       "fields": "pixelSize"}},
+        *[{"updateDimensionProperties": {"range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": i,
+                                                   "endIndex": i + 1}, "properties": {"pixelSize": px},
+                                         "fields": "pixelSize"}} for i, px in enumerate(INVENTORY_WIDTHS)],
         {"setBasicFilter": {"filter": {"range": grid(sid, 0, n, 0, 17)}}},
     ]})
     print("[OK] Inventory formats + status colours + filter")
@@ -199,7 +201,7 @@ def charts(sh) -> None:
     def src(ws, c, r1):
         return {"sourceRange": {"sources": [grid(ws.id, 0, r1, c, c + 1)]}}
     line = {"addChart": {"chart": {"spec": {
-        "title": "Oversold orders per day: stock synced once a day vs every 15 min vs this engine",
+        "title": "Oversold orders per day",
         "basicChart": {"chartType": "LINE", "legendPosition": "BOTTOM_LEGEND", "headerCount": 1,
                        "axis": [{"position": "LEFT_AXIS", "title": "oversold orders"}],
                        "domains": [{"domain": src(daily, 0, 61)}],
@@ -276,9 +278,13 @@ def main(target: str) -> None:
     put(sh, "Inventory", inventory_rows(state))
     inventory_formats(sh)
     comp = ba["Comparison"].copy()
-    comp["stock sync"] = comp["stock sync"].str.replace("event-time reservation + push", "engine (event-time)")
+    comp["stock sync"] = comp["stock sync"].replace({
+        "once a day (by hand)": "daily, by hand", "every 15 minutes": "every 15 min",
+        "event-time reservation + push": "this engine"})
     put(sh, "Before vs After", values(comp))
-    put(sh, "Daily", values(ba["Daily"]))
+    daily_ws = put(sh, "Daily", values(ba["Daily"]))
+    sh.batch_update({"requests": [fmt(daily_ws.id, 1, daily_ws.row_count, 0, 1,
+                                      {"numberFormat": {"type": "DATE", "pattern": "mmm d"}})]})
     put(sh, "PO Drafts", values(po))
     put(sh, "Low-Stock Alerts", values(alerts))
     put(sh, "Reservations", values(ledger))

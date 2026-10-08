@@ -226,11 +226,11 @@
     "no repeat alert inside cooldown": true
   },
   "runtime_sec": {
-    "baseline_1440m": 2.9,
-    "baseline_240m": 2.6,
-    "baseline_60m": 2.2,
-    "baseline_15m": 3.2,
-    "engine": 5.8,
-    "replay": 6.1
+    "baseline_1440m": 5.1,
+    "baseline_240m": 5.1,
+    "baseline_60m": 5.4,
+    "baseline_15m": 3.9,
+    "engine": 13.7,
+    "replay": 14.3
   }
 }

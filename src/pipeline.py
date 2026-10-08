@@ -139,9 +139,10 @@ def comparison(engine: SimResult, baselines: dict) -> pd.DataFrame:
 def daily_table(engine: SimResult, baselines: dict) -> pd.DataFrame:
     d = engine.daily.copy()
     out = pd.DataFrame({"date": d["date"]})
+    names = {1440: "daily sync", 240: "4-hour sync", 60: "hourly sync", 15: "15-min sync"}
     for k, b in sorted(baselines.items(), reverse=True):
-        out[f"oversold orders - sync {k}m"] = b.daily["oversold_orders"].astype(int)
-    out["oversold orders - engine"] = d["oversold_orders"].astype(int)
+        out[f"oversold: {names.get(k, f'{k}-min sync')}"] = b.daily["oversold_orders"].astype(int)
+    out["oversold: engine"] = d["oversold_orders"].astype(int)
     for col in ("orders", "accepted_units", "revenue", "pos", "alerts", "suppressions", "receipt_units"):
         out[f"engine {col}"] = d[col].round(2) if col == "revenue" else d[col].astype(int)
     return out
