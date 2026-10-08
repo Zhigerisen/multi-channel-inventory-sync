@@ -26,7 +26,7 @@ BG0, CARD, CARD2 = "#0b1220", "#131f33", "#0f1a2e"
 ACCENT, RED, AMBER, WHITE, MUTE, GRID = "#34d399", "#f87171", "#f59e0b", "#ffffff", "#9fb0c8", "#22304a"
 plt.rcParams["font.family"] = "DejaVu Sans"
 MONO = "DejaVu Sans Mono"
-CYRILLIC = re.compile(r"[Ѐ-ӿ]")
+CYRILLIC = re.compile(f"[{chr(0x400)}-{chr(0x4FF)}]")
 TEXTS: list[str] = []
 
 
